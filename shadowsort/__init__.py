@@ -1,0 +1,5 @@
+"""ShadowSort - smart photo organizer by Shadow Creative Studio."""
+
+__app_name__ = "ShadowSort"
+__version__ = "1.5.0"
+__brand__ = "Shadow Creative Studio"

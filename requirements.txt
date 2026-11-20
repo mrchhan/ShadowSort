@@ -1,0 +1,6 @@
+PySide6>=6.6
+Pillow>=10.0
+numpy>=1.24
+pillow-heif>=0.16      # iPhone .HEIC photos
+Send2Trash>=1.8        # "Empty To Delete" goes to the Recycle Bin
+opencv-python-headless>=4.8   # face recognition (YuNet + SFace, offline)

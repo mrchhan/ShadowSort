@@ -1,0 +1,5 @@
+# Optional AI pack - recognises People, Food, Cars, Documents, Pets ... (runs offline after first download)
+-r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+transformers>=4.40

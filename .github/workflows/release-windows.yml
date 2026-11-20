@@ -1,0 +1,73 @@
+name: Release Windows app
+
+# Builds ShadowSort-Setup-<version>.exe and a portable .zip and attaches them to a GitHub Release.
+# Start it from the Actions tab (Run workflow), or push a tag such as v1.5.0.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt pyinstaller pytest
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(python -c 'import shadowsort; print(shadowsort.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle face models (offline face recognition)
+        run: python download_model.py faces
+
+      - name: Build ShadowSort.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name ShadowSort
+          --icon assets\icon.ico --add-data "assets;assets" main.py
+
+      - name: Add models next to the exe
+        shell: pwsh
+        run: Copy-Item -Recurse models dist\ShadowSort\models
+
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\ShadowSort -DestinationPath "ShadowSort-Portable-${{ steps.ver.outputs.version }}.zip"
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShadowSort-Windows
+          path: |
+            installer/*.exe
+            ShadowSort-Portable-*.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: ShadowSort ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            installer/*.exe
+            ShadowSort-Portable-*.zip
