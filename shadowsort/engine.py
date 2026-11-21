@@ -18,6 +18,8 @@ from .classifier import make_classifier
 
 DELETE_FOLDER = "_To Delete"
 PEOPLE_FOLDER = "By Person"
+GROUP_FOLDER = "Group Photos"
+TOGETHER_FOLDER = "Together"
 STATE_FOLDER = ".shadowsort"
 MONTHS = ["01 - January", "02 - February", "03 - March", "04 - April", "05 - May", "06 - June",
           "07 - July", "08 - August", "09 - September", "10 - October", "11 - November", "12 - December"]
@@ -47,6 +49,9 @@ class Options:
     copy_instead_of_move: bool = False
     faces: bool = True                 # find people and make a folder per person
     min_person_photos: int = 2
+    split_people: bool = True          # By Person/<name>/Solo | Small Group | Group
+    group_size: int = 5                # main people in a photo for it to count as a big group
+    group_folder: bool = True          # also a "Group Photos" folder with every big-group photo once
     workers: int = max(2, min(8, (os.cpu_count() or 4)))
 
 
@@ -69,6 +74,7 @@ class Plan:
     skipped: List[str]                  # files that are not images
     people: list = field(default_factory=list)   # faces.Person
     faces: list = field(default_factory=list)    # faces.Face
+    together: list = field(default_factory=list)  # lists of person names for Together/ folders
     unknown_faces: int = 0
 
     @property
@@ -369,16 +375,17 @@ def build_plan(opts: Options, progress: Optional[Progress] = None,
 
 
 def person_link_actions(plan: Plan) -> List[Action]:
-    """One link per (person, photo) pointing at the photo's organized location."""
+    """Links (not copies) pointing at each photo's organized location:
+    By Person/<name>/[Solo|Small Group|Group]/, Group Photos/, Together/<A & B>/."""
+    from . import faces as F
+    opts = plan.options
     where = {a.src: a.dst for a in plan.actions if a.kind == "keep"}
+    mains = F.main_faces(plan.faces) if plan.faces else {}
     out: List[Action] = []
-    for person in plan.people:
-        if person.hidden or not person.photos:
-            continue
-        name = _safe(person.name.strip() or person.default_name)
-        folder = os.path.join(plan.options.output, PEOPLE_FOLDER, name)
-        used = set()
-        for src in sorted(person.photos):
+
+    def add(folder, sources, reason, used=None):
+        used = set() if used is None else used
+        for src in sorted(sources):
             real = where.get(src)
             if not real:
                 continue
@@ -389,8 +396,64 @@ def person_link_actions(plan: Plan) -> List[Action]:
                 dst = f"{base} ({n}){ext}"
                 n += 1
             used.add(dst.lower())
-            out.append(Action(real, dst, "link", f"Photo of {person.name}", category=person.name))
+            out.append(Action(real, dst, "link", reason))
+
+    for person in plan.people:
+        if person.hidden or not person.photos:
+            continue
+        name = _safe(person.name.strip() or person.default_name)
+        folder = os.path.join(opts.output, PEOPLE_FOLDER, name)
+        if opts.split_people and mains:
+            kinds = F.person_photo_kinds(person, plan.faces, mains, opts.group_size)
+            for kind in F.KINDS:
+                add(os.path.join(folder, kind), [p for p, k in kinds.items() if k == kind],
+                    f"{kind} photo of {person.name}")
+        else:
+            add(folder, person.photos, f"Photo of {person.name}")
+    if opts.group_folder and mains:
+        add(os.path.join(opts.output, GROUP_FOLDER), F.group_photos(plan.faces, mains, opts.group_size),
+            "Group photo")
+    for names in getattr(plan, "together", []):
+        people = [p for p in plan.people if p.name in names]
+        if len(people) >= 2:
+            add(os.path.join(opts.output, PEOPLE_FOLDER, TOGETHER_FOLDER,
+                             " & ".join(_safe(p.name) for p in people)),
+                F.together_photos(people), "Together")
     return out
+
+
+def make_links(plan: Plan, actions: List[Action], log_path: Optional[str] = None) -> int:
+    """Create extra link folders after Organize (e.g. a new Together folder); recorded for Undo."""
+    made = []
+    for a in actions:
+        if not os.path.exists(a.src):
+            continue
+        os.makedirs(os.path.dirname(a.dst), exist_ok=True)
+        dst = a.dst
+        base, ext = os.path.splitext(dst)
+        n = 2
+        while os.path.exists(dst):
+            if os.path.exists(dst) and os.path.samefile(dst, a.src):
+                break
+            dst = f"{base} ({n}){ext}"
+            n += 1
+        if os.path.exists(dst):
+            continue
+        try:
+            os.link(a.src, dst)
+            kind = "link"
+        except OSError:
+            shutil.copy2(a.src, dst)
+            kind = "copy"
+        made.append({"link": dst, "kind": kind})
+    log_path = log_path or latest_undo_log(plan.options.output)
+    if log_path and made:
+        with open(log_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["moves"].extend(made)
+        with open(log_path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1)
+    return len(made)
 
 
 def _resolve_name_clashes(actions: List[Action]) -> None:

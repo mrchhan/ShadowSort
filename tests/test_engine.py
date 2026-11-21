@@ -91,3 +91,40 @@ def test_people_folders_use_links_not_copies(library):
     assert os.path.samefile(ali, sara)                # one file on disk, two folders
     undo(log)
     assert (library / "IMG_2.jpg").exists() and not ali.exists()
+
+
+def test_people_split_into_solo_and_group_folders(library):
+    from shadowsort import faces as F
+
+    plan = build_plan(opts(library), log=lambda m: None)
+    p = lambda n: str(library / n)  # noqa: E731
+    e = np.ones(128, np.float32) / np.sqrt(128)
+    plan.faces = [F.Face(p("IMG_2.jpg"), (0.1, 0.1, 0.1, 0.1), 0.9, 120, e),                       # 0 Ali solo
+                  *[F.Face(p("IMG_3.jpg"), (0.1 * k, 0.1, 0.1, 0.1), 0.9, 100, e) for k in range(5)]]  # 1-5 group of 5
+    plan.people = [F.Person(0, "Ali", "Person 1", [0, 1], {p("IMG_2.jpg"), p("IMG_3.jpg")}),
+                   F.Person(1, "Sara", "Person 2", [2], {p("IMG_3.jpg")})]
+    plan.together = [["Ali", "Sara"]]
+    apply_plan(plan)
+    out = library / "Organized"
+    assert (out / PEOPLE_FOLDER / "Ali" / "Solo" / "IMG_2.jpg").exists()
+    assert (out / PEOPLE_FOLDER / "Ali" / "Group" / "IMG_3.jpg").exists()
+    assert not (out / PEOPLE_FOLDER / "Sara" / "Solo").exists()
+    assert (out / "Group Photos" / "IMG_3.jpg").exists()
+    assert (out / PEOPLE_FOLDER / "Together" / "Ali & Sara" / "IMG_3.jpg").exists()
+    assert os.path.samefile(out / "Group Photos" / "IMG_3.jpg", out / PEOPLE_FOLDER / "Ali" / "Group" / "IMG_3.jpg")
+
+
+def test_export_zip_only_chosen_kinds(library, tmp_path):
+    import zipfile
+    from shadowsort import faces as F
+
+    p = lambda n: str(library / n)  # noqa: E731
+    e = np.ones(128, np.float32) / np.sqrt(128)
+    faces = [F.Face(p("IMG_2.jpg"), (0.1, 0.1, 0.1, 0.1), 0.9, 120, e),
+             F.Face(p("IMG_3.jpg"), (0.1, 0.1, 0.1, 0.1), 0.9, 100, e),
+             F.Face(p("IMG_3.jpg"), (0.5, 0.1, 0.1, 0.1), 0.9, 100, e)]
+    ali = F.Person(0, "Ali", "Person 1", [0, 1], {p("IMG_2.jpg"), p("IMG_3.jpg")})
+    [solo] = F.export_zips([ali], lambda s: s, str(tmp_path / "a"), faces=faces, kinds=(F.SOLO,))
+    assert zipfile.ZipFile(solo).namelist() == ["Solo/IMG_2.jpg"]
+    [both] = F.export_zips([ali], lambda s: s, str(tmp_path / "b"), faces=faces)
+    assert sorted(zipfile.ZipFile(both).namelist()) == ["Small Group/IMG_3.jpg", "Solo/IMG_2.jpg"]

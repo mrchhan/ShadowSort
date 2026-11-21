@@ -1,7 +1,7 @@
 ; Inno Setup script - ShadowSort by Shadow Creative Studio  (https://jrsoftware.org/isinfo.php)
 #define AppName "ShadowSort"
 #ifndef AppVersion
-  #define AppVersion "1.5.0"
+  #define AppVersion "1.6.0"
 #endif
 #define AppPublisher "Shadow Creative Studio"
 

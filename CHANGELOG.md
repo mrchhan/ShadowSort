@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0
+- Each person's folder is split into **Solo / Small Group / Group**. Background faces don't count, and veiled, side-on or distant faces still count as "someone else is in the photo".
+- New **Group Photos** folder with every big group photo once.
+- **Together:** photos that contain all of the people you pick, as a folder or a ZIP.
+- **Export** lets you pick which kinds go into each person's ZIP, with optional sub-folders.
+- People cards show *solo · small · group* counts, and **Photos / fix** can filter by kind.
+- Settings: where a big group starts, plus on/off switches for the split and the Group Photos folder.
+
 ## 1.5.0 — first public release
 - Sorts photos into folders by content (optional offline AI) and/or year and month.
 - Finds exact and near-identical duplicates and keeps the best copy.

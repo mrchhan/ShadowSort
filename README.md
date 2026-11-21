@@ -25,8 +25,8 @@
 
 | | |
 |---|---|
-| **Installer** | Download **`ShadowSort-Setup-1.5.0.exe`** from [Releases](https://github.com/mrchhan/shadowsort/releases) and run it. It adds a Start menu entry and a desktop shortcut. |
-| **Portable** | **`ShadowSort-Portable-1.5.0.zip`**: unzip anywhere and run `ShadowSort.exe`. No install needed. |
+| **Installer** | Download **`ShadowSort-Setup-1.6.0.exe`** from [Releases](https://github.com/mrchhan/shadowsort/releases) and run it. It adds a Start menu entry and a desktop shortcut. |
+| **Portable** | **`ShadowSort-Portable-1.6.0.zip`**: unzip anywhere and run `ShadowSort.exe`. No install needed. |
 
 > Windows may show *"Windows protected your PC"* because the installer isn't code-signed yet. Click **More info → Run anyway**.
 
@@ -58,7 +58,10 @@
 - Finds every face, groups the same person across all your photos and shows them in the **People** tab. Name someone once and they're recognised automatically next time.
 - **Group photos appear in every person's folder without using extra space.** The photo is stored once and each person's folder gets a Windows *hard link* to it, which opens like a normal file.
 - **Fix mistakes in seconds:** drag one card onto another to join them, use **Photos / fix** to move wrong faces out, or **Hide** someone.
-- **Export a ZIP per person** (`Ali.zip`, `Sara.zip`…), ready for WhatsApp, email or USB.
+- **Solo, Small Group and Group photos are kept apart.** Each person's folder is split into `Solo` (only them), `Small Group` (2–4 people) and `Group` (5+). You choose where a big group starts. Small faces far in the background don't count, so a portrait with a waiter behind it is still solo.
+- **A `Group Photos` folder** holds every big group photo (stage photos, family line-ups) once.
+- **Together:** tick two or more people, for example the bride and groom, to get only the photos they're all in, as a folder or a ZIP.
+- **Export a ZIP per person** (`Ali.zip`, `Sara.zip`…) with only the kinds you pick, such as *Solo + Small Group*. They're ready for WhatsApp, email or USB.
 
 ### 9 animation styles
 Mosaic, Globe, Galaxy, 3D Wall, Neural, Swipe Deck, Polaroid Desk, Matrix Rain and Black Hole. Pick one from **STYLE** in the top bar.
@@ -89,9 +92,14 @@ ShadowSort Organized/
 ├── People/2025/03 - March/IMG_1234.jpg
 ├── Food & Drinks/2024/12 - December/…
 ├── Screenshots/…
-├── By Person/
-│   ├── Ali/        ← links, no extra disk space
-│   └── Sara/
+├── By Person/          ← links, no extra disk space
+│   ├── Ali/
+│   │   ├── Solo/
+│   │   ├── Small Group/
+│   │   └── Group/
+│   ├── Sara/
+│   └── Together/Ali & Sara/
+├── Group Photos/
 ├── _To Delete/
 │   ├── Duplicates/G001_IMG_1234 copy.jpg
 │   ├── Blurry/
@@ -128,7 +136,7 @@ build.bat ai     :: also bundles the content-recognition AI
 
 Then open `installer.iss` in [Inno Setup](https://jrsoftware.org/isinfo.php) and press **Compile**.
 
-**Automatic releases:** on GitHub, open **Actions → Release Windows app → Run workflow**, or push a tag such as `v1.5.0`. GitHub builds the installer and the portable zip on Windows and attaches them to a new Release.
+**Automatic releases:** on GitHub, open **Actions → Release Windows app → Run workflow**, or push a tag such as `v1.6.0`. GitHub builds the installer and the portable zip on Windows and attaches them to a new Release.
 
 ## How it works inside
 

@@ -41,6 +41,12 @@ MIN_FACE_PX = 34     # ignore tiny background faces
 MIN_SCORE = 0.82     # detector confidence
 MIN_SHARP = 18.0     # skip out-of-focus background faces (Laplacian variance of the face at 96 px)
 CROP = 112           # face thumbnail size for the UI
+PRESENT_SCORE = 0.5  # faces this confident count as "someone else is in the photo", even if too small to recognise
+MAIN_FACE = 0.35     # a face counts as a "main" person in a photo if it is at least this big vs the largest face
+
+SOLO, SMALL, GROUP = "Solo", "Small Group", "Group"
+KINDS = (SOLO, SMALL, GROUP)
+GROUP_SIZE = 5       # this many main people or more = a big group photo
 
 
 def available() -> bool:
@@ -123,6 +129,7 @@ class Face:
     size: float           # face width in pixels (analysis scale)
     emb: np.ndarray
     person: int = -1
+    scene: tuple = ()     # sizes of every face found in this photo (incl. veiled / distant / soft ones)
 
     @property
     def quality(self):
@@ -182,10 +189,12 @@ class FaceEngine:
         h, w = img.shape[:2]
         det, rec = self._models()
         det.setInputSize((w, h))
+        det.setScoreThreshold(PRESENT_SCORE)
         _, found = det.detect(img)
         out = []
         if found is None:
             return out
+        scene = tuple(float(f[2]) for f in found if float(f[14]) >= PRESENT_SCORE)
         for f in found:
             x, y, fw, fh, score = float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[14])
             if score < MIN_SCORE or fw < MIN_FACE_PX:
@@ -200,7 +209,7 @@ class FaceEngine:
             aligned = rec.alignCrop(img, f)
             e = rec.feature(aligned).flatten().astype(np.float32)
             e /= np.linalg.norm(e) + 1e-9
-            out.append(Face(path, (x / w, y / h, fw / w, fh / h), score, fw, e))
+            out.append(Face(path, (x / w, y / h, fw / w, fh / h), score, fw, e, scene=scene))
         return out
 
 
@@ -507,36 +516,151 @@ def split_faces(people: List[Person], faces: List[Face], person: Person, idx: Li
 # ---------------------------------------------------------------------------
 # sharing
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# solo / small group / group
+# ---------------------------------------------------------------------------
+def main_faces(faces: List[Face]) -> Dict[str, tuple]:
+    """Per photo: (how many main people, size of the biggest face). Small faces far in the
+    background don't count; veiled, side-on or distant faces that were too small to recognise do."""
+    sizes: Dict[str, List[float]] = {}
+    for f in faces:
+        if f.scene:
+            sizes[f.path] = list(f.scene)
+        else:
+            sizes.setdefault(f.path, [])
+    for f in faces:
+        if not f.scene:
+            sizes[f.path].append(f.size)
+    out = {}
+    for path, sz in sizes.items():
+        biggest = max(sz)
+        out[path] = (sum(1 for x in sz if x >= MAIN_FACE * biggest), biggest)
+    return out
+
+
+def kind_for(count: int, group_size: int = GROUP_SIZE) -> str:
+    if count <= 1:
+        return SOLO
+    return SMALL if count < group_size else GROUP
+
+
+def person_photo_kinds(person: Person, faces: List[Face], mains: Dict[str, tuple],
+                       group_size: int = GROUP_SIZE) -> Dict[str, str]:
+    """photo path -> Solo / Small Group / Group, from this person's point of view."""
+    out = {}
+    for i in person.faces:
+        f = faces[i]
+        count, biggest = mains.get(f.path, (1, f.size))
+        if f.size < MAIN_FACE * biggest:   # this person is only in the background: never "solo"
+            count += 1
+        out[f.path] = kind_for(max(count, 1), group_size)
+    return out
+
+
+def kind_counts(kinds: Dict[str, str]) -> Dict[str, int]:
+    c = {k: 0 for k in KINDS}
+    for v in kinds.values():
+        c[v] += 1
+    return c
+
+
+def group_photos(faces: List[Face], mains: Dict[str, tuple], group_size: int = GROUP_SIZE) -> List[str]:
+    return sorted(p for p, (count, _) in mains.items() if count >= group_size)
+
+
+def together_photos(people: List[Person]) -> Set[str]:
+    """Photos that contain every one of these people."""
+    if not people:
+        return set()
+    out = set(people[0].photos)
+    for p in people[1:]:
+        out &= p.photos
+    return out
+
+
+# ---------------------------------------------------------------------------
+# sharing
+# ---------------------------------------------------------------------------
+def _safe_name(name: str, fallback: str = "Photos") -> str:
+    return "".join("_" if c in '<>:"/\\|?*' else c for c in name.strip()).strip(" .") or fallback
+
+
+def _write_zip(path: str, items, locate, tick) -> None:
+    """items: (original path, folder inside the zip or '')."""
+    used = set()
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for src, sub in items:
+            real = locate(src)
+            tick()
+            if not real or not os.path.exists(real):
+                continue
+            arc = os.path.basename(real)
+            base, ext = os.path.splitext(arc)
+            k = 2
+            while (sub + "/" + arc).lower() in used:
+                arc = f"{base} ({k}){ext}"
+                k += 1
+            used.add((sub + "/" + arc).lower())
+            z.write(real, f"{sub}/{arc}" if sub else arc)
+
+
+def _unique(path):
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(path):
+        path = f"{base} ({n}){ext}"
+        n += 1
+    return path
+
+
 def export_zips(people: List[Person], locate: Callable[[str], Optional[str]], target: str,
-                progress: Optional[Callable[[int, int], None]] = None) -> List[str]:
-    """One ZIP per person. `locate` maps an original photo path to where the file is now."""
+                progress: Optional[Callable[[int, int], None]] = None,
+                faces: Optional[List[Face]] = None, kinds=KINDS, group_size: int = GROUP_SIZE,
+                split: bool = True) -> List[str]:
+    """One ZIP per person with only the chosen kinds (Solo / Small Group / Group), each in its own folder."""
     os.makedirs(target, exist_ok=True)
-    jobs = [(p, sorted(p.photos)) for p in people if not p.hidden]
-    total = sum(len(ph) for _, ph in jobs)
-    done, made = 0, []
-    for person, photos in jobs:
-        name = "".join("_" if c in '<>:"/\\|?*' else c for c in person.name.strip()) or person.default_name
-        path = os.path.join(target, f"{name}.zip")
-        n = 2
-        while os.path.exists(path):
-            path = os.path.join(target, f"{name} ({n}).zip")
-            n += 1
-        used = set()
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-            for src in photos:
-                real = locate(src)
-                done += 1
-                if progress:
-                    progress(done, total)
-                if not real or not os.path.exists(real):
-                    continue
-                arc = os.path.basename(real)
-                base, ext = os.path.splitext(arc)
-                k = 2
-                while arc.lower() in used:
-                    arc = f"{base} ({k}){ext}"
-                    k += 1
-                used.add(arc.lower())
-                z.write(real, arc)
+    mains = main_faces(faces) if faces is not None else None
+    jobs = []
+    for p in people:
+        if p.hidden:
+            continue
+        if mains is not None:
+            pk = person_photo_kinds(p, faces, mains, group_size)
+            items = [(src, k if split else "") for src, k in sorted(pk.items()) if k in kinds]
+        else:
+            items = [(src, "") for src in sorted(p.photos)]
+        if items:
+            jobs.append((p, items))
+    total = sum(len(it) for _, it in jobs)
+    state = {"done": 0}
+
+    def tick():
+        state["done"] += 1
+        if progress:
+            progress(state["done"], total)
+
+    made = []
+    for person, items in jobs:
+        path = _unique(os.path.join(target, f"{_safe_name(person.name, person.default_name)}.zip"))
+        _write_zip(path, items, locate, tick)
         made.append(path)
     return made
+
+
+def export_together_zip(people: List[Person], locate: Callable[[str], Optional[str]], target: str,
+                        progress: Optional[Callable[[int, int], None]] = None) -> Optional[str]:
+    photos = sorted(together_photos(people))
+    if not photos:
+        return None
+    os.makedirs(target, exist_ok=True)
+    name = " & ".join(_safe_name(p.name, p.default_name) for p in people)
+    path = _unique(os.path.join(target, f"{name}.zip"))
+    state = {"done": 0}
+
+    def tick():
+        state["done"] += 1
+        if progress:
+            progress(state["done"], len(photos))
+
+    _write_zip(path, [(p, "") for p in photos], locate, tick)
+    return path

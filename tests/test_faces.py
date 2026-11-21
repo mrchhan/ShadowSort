@@ -46,3 +46,30 @@ def test_split_and_merge_people(monkeypatch):
     assert new is not None and len(people) == 3 and set(new.faces) == set(moved)
     F.merge_people(people, faces, new, a)
     assert len(people) == 2 and len(a.faces) == 4
+
+
+def _face(path, size, x=0.1, emb=None):
+    e = emb if emb is not None else np.ones(128, np.float32) / np.sqrt(128)
+    return F.Face(path, (x, 0.1, 0.1, 0.1), 0.95, float(size), e)
+
+
+def test_solo_small_group_and_background_faces():
+    faces = [
+        _face("solo.jpg", 200), _face("solo.jpg", 40, x=0.8),            # tiny guest far behind: still solo
+        _face("pair.jpg", 150), _face("pair.jpg", 140, x=0.5),
+        _face("big.jpg", 90), *[_face("big.jpg", 85, x=0.1 * k) for k in range(2, 7)],
+        _face("behind.jpg", 300, x=0.5), _face("behind.jpg", 50),        # our person small in the background
+    ]
+    me = F.Person(0, "Ali", "Person 1", [0, 2, 4, 11], {"solo.jpg", "pair.jpg", "big.jpg", "behind.jpg"})
+    mains = F.main_faces(faces)
+    kinds = F.person_photo_kinds(me, faces, mains, group_size=5)
+    assert kinds == {"solo.jpg": F.SOLO, "pair.jpg": F.SMALL, "big.jpg": F.GROUP, "behind.jpg": F.SMALL}
+    assert F.group_photos(faces, mains, 5) == ["big.jpg"]
+
+
+def test_together_needs_everyone():
+    a = F.Person(0, "A", "A", [], {"1.jpg", "2.jpg", "3.jpg"})
+    b = F.Person(1, "B", "B", [], {"2.jpg", "3.jpg", "4.jpg"})
+    c = F.Person(2, "C", "C", [], {"3.jpg"})
+    assert F.together_photos([a, b]) == {"2.jpg", "3.jpg"}
+    assert F.together_photos([a, b, c]) == {"3.jpg"}

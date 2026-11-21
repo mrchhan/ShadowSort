@@ -12,7 +12,7 @@ from PySide6.QtCore import (QSize, QEasingCurve, QObject, QPoint, QPropertyAnima
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QGraphicsOpacityEffect, QListWidget, QListWidgetItem,
+    QDialog, QGraphicsOpacityEffect, QListWidget, QListWidgetItem, QSpinBox,
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider,
     QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
@@ -391,6 +391,18 @@ class PhotosDialog(QDialog):
         tip.setObjectName("muted")
         tip.setWordWrap(True)
         lay.addWidget(tip)
+        self.kinds = view.kinds_for(person)
+        frow = QHBoxLayout()
+        self.kind_filter = QComboBox()
+        self.kind_filter.addItem("All photos", "")
+        if self.kinds:
+            kc = F.kind_counts(self.kinds)
+            for k in F.KINDS:
+                self.kind_filter.addItem(f"{k} ({kc[k]})", k)
+        self.kind_filter.currentIndexChanged.connect(self._filter)
+        frow.addWidget(self.kind_filter)
+        frow.addStretch()
+        lay.addLayout(frow)
         self.lst = QListWidget()
         self.lst.setViewMode(QListWidget.ViewMode.IconMode)
         self.lst.setIconSize(QSize(230, 230))
@@ -406,7 +418,8 @@ class PhotosDialog(QDialog):
             img = photo_with_box_qimage(real, f.box)
             it = QListWidgetItem(QIcon(QPixmap.fromImage(img)) if not img.isNull() else QIcon(), os.path.basename(f.path))
             it.setData(Qt.ItemDataRole.UserRole, i)
-            it.setToolTip(real)
+            it.setData(Qt.ItemDataRole.UserRole + 1, self.kinds.get(f.path, ""))
+            it.setToolTip(f"{real}\n{self.kinds.get(f.path, '')}")
             self.lst.addItem(it)
         lay.addWidget(self.lst, 1)
         row = QHBoxLayout()
@@ -425,6 +438,12 @@ class PhotosDialog(QDialog):
         lay.addLayout(row)
         self._sel()
 
+    def _filter(self):
+        k = self.kind_filter.currentData()
+        for r in range(self.lst.count()):
+            it = self.lst.item(r)
+            it.setHidden(bool(k) and it.data(Qt.ItemDataRole.UserRole + 1) != k)
+
     def _sel(self):
         n = len(self.lst.selectedItems())
         self.count.setText(f"{n} selected" if n else "Nothing selected")
@@ -437,6 +456,113 @@ class PhotosDialog(QDialog):
             return
         F.split_faces(self.view.plan.people, self.view.plan.faces, self.person, idx, new_person=new)
         self.changed = True
+        self.accept()
+
+
+class ExportDialog(QDialog):
+    """Choose which photos go into each person's ZIP."""
+
+    def __init__(self, parent, people_count):
+        super().__init__(parent)
+        self.setWindowTitle("Export a ZIP per person")
+        self.setMinimumWidth(440)
+        lay = QVBoxLayout(self)
+        t = QLabel(f"<b>{people_count} ZIP files</b>, one per person. Which photos should each ZIP contain?")
+        t.setWordWrap(True)
+        lay.addWidget(t)
+        self.boxes = {}
+        notes = {F.SOLO: "only that person in the photo",
+                 F.SMALL: "with a few others (family, friends)",
+                 F.GROUP: "big group photos (stage, family line-ups)"}
+        for k in F.KINDS:
+            b = QCheckBox(f"{k}  —  {notes[k]}")
+            b.setChecked(k != F.GROUP)
+            b.toggled.connect(self._check)
+            self.boxes[k] = b
+            lay.addWidget(b)
+        self.split = QCheckBox("Keep Solo / Small Group / Group as folders inside the ZIP")
+        self.split.setChecked(True)
+        lay.addWidget(self.split)
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.ok = QPushButton("Choose folder && export…")
+        self.ok.setObjectName("primary")
+        self.ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(self.ok)
+        lay.addLayout(row)
+
+    def _check(self):
+        self.ok.setEnabled(any(b.isChecked() for b in self.boxes.values()))
+
+    def kinds(self):
+        return tuple(k for k, b in self.boxes.items() if b.isChecked())
+
+
+class TogetherDialog(QDialog):
+    """Pick 2+ people and get only the photos they are all in."""
+
+    def __init__(self, parent, people, organized):
+        super().__init__(parent)
+        self.people = [p for p in people if not p.hidden]
+        self.action = None
+        self.setWindowTitle("Together — photos with all of these people")
+        self.resize(460, 600)
+        lay = QVBoxLayout(self)
+        tip = QLabel("Tick two or more people, e.g. the bride and groom, to get only the photos they are all in.")
+        tip.setObjectName("muted")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        self.lst = QListWidget()
+        self.lst.setIconSize(QSize(40, 40))
+        self.lst.setStyleSheet("QListWidget{background:#0a0f1d;border:1px solid #1d2744;border-radius:10px;}"
+                               "QListWidget::item{padding:4px;color:#e8eefc;}"
+                               "QListWidget::indicator{width:18px;height:18px;border-radius:4px;border:1px solid #3b5590;"
+                               "background:#080d1a;}"
+                               "QListWidget::indicator:checked{border:none;background:qlineargradient(x1:0,y1:0,x2:1,"
+                               "y2:1,stop:0 #03bbfe,stop:1 #ff3b2f);}")
+        for p in self.people:
+            it = QListWidgetItem(QIcon(crop_pixmap(p.crops[0], 40)) if p.crops else QIcon(),
+                                 f"{p.name}   ·   {len(p.photos)} photos")
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Unchecked)
+            self.lst.addItem(it)
+        self.lst.itemChanged.connect(self._update)
+        lay.addWidget(self.lst, 1)
+        self.result = QLabel()
+        lay.addWidget(self.result)
+        row = QHBoxLayout()
+        self.folder_btn = QPushButton("Add a Together folder")
+        self.folder_btn.setToolTip("Makes By Person/Together/<names> with links — no extra space"
+                                   + ("" if organized else " (created when you press Organize now)"))
+        self.folder_btn.clicked.connect(lambda: self._done("folder"))
+        self.zip_btn = QPushButton("Export ZIP…")
+        self.zip_btn.setObjectName("primary")
+        self.zip_btn.clicked.connect(lambda: self._done("zip"))
+        row.addStretch()
+        row.addWidget(self.folder_btn)
+        row.addWidget(self.zip_btn)
+        lay.addLayout(row)
+        self._update()
+
+    def chosen(self):
+        return [p for r, p in enumerate(self.people) if self.lst.item(r).checkState() == Qt.CheckState.Checked]
+
+    def _update(self, *_):
+        ch = self.chosen()
+        n = len(F.together_photos(ch)) if len(ch) >= 2 else 0
+        if len(ch) < 2:
+            self.result.setText("<span style='color:#7d8bb0'>Tick at least two people.</span>")
+        else:
+            self.result.setText(f"<b style='color:#03bbfe'>{n}</b> photos with "
+                                + " & ".join(p.name for p in ch))
+        for b in (self.folder_btn, self.zip_btn):
+            b.setEnabled(n > 0)
+
+    def _done(self, action):
+        self.action = action
         self.accept()
 
 
@@ -461,6 +587,17 @@ class PersonCard(QFrame):
         info = QVBoxLayout()
         cnt = QLabel(f"<b style='font-size:15pt'>{len(person.photos):,}</b> <span style='color:#7d8bb0'>photos</span>")
         info.addWidget(cnt)
+        kinds = view.kinds_for(person)
+        if kinds:
+            kc = F.kind_counts(kinds)
+            split = QLabel(f"<span style='color:#03bbfe'>{kc[F.SOLO]} solo</span> · "
+                           f"<span style='color:#8fd0ff'>{kc[F.SMALL]} small</span> · "
+                           f"<span style='color:#ff8a3d'>{kc[F.GROUP]} group</span>")
+            split.setStyleSheet("font-size:9pt;")
+            split.setToolTip("Solo = only this person · Small = 2 to "
+                             f"{view.group_size() - 1} people · Group = {view.group_size()}+ people")
+        else:
+            split = None
         if person.known:
             badge = QLabel("● recognised")
             badge.setStyleSheet("color:#22d39a;font-size:8.5pt;")
@@ -476,6 +613,8 @@ class PersonCard(QFrame):
         info.addStretch()
         top.addLayout(info)
         lay.addLayout(top)
+        if split is not None:
+            lay.addWidget(split)
         self.name = QLineEdit(person.name)
         self.name.setPlaceholderText(person.default_name)
         self.name.setObjectName("personName")
@@ -612,10 +751,14 @@ class PeopleView(QWidget):
     exportRequested = Signal()
     openRequested = Signal()
 
-    def __init__(self, locate):
+    togetherRequested = Signal()
+
+    def __init__(self, locate, group_size=lambda: F.GROUP_SIZE):
         super().__init__()
         self.plan = None
         self.locate = locate
+        self.group_size = group_size
+        self._mains = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 16, 24, 8)
         head = QHBoxLayout()
@@ -631,7 +774,11 @@ class PeopleView(QWidget):
         self.export_btn = QPushButton("Export a ZIP per person…")
         self.export_btn.setObjectName("primary")
         self.export_btn.clicked.connect(self.exportRequested.emit)
+        self.together_btn = QPushButton("Together…")
+        self.together_btn.setToolTip("Photos that have two or more chosen people in them")
+        self.together_btn.clicked.connect(self.togetherRequested.emit)
         head.addWidget(self.open_btn)
+        head.addWidget(self.together_btn)
         head.addWidget(self.export_btn)
         lay.addLayout(head)
         tip = QLabel("Type a name under each face. If one person shows up twice, drag one card onto the other (or use "
@@ -682,7 +829,15 @@ class PeopleView(QWidget):
         self.plan = plan
         self.rebuild()
 
+    def kinds_for(self, person):
+        if not self.plan or not self.plan.faces:
+            return {}
+        if self._mains is None:
+            self._mains = F.main_faces(self.plan.faces)
+        return F.person_photo_kinds(person, self.plan.faces, self._mains, self.group_size())
+
     def rebuild(self):
+        self._mains = None
         for c in self.cards:
             c.setParent(None)
             c.deleteLater()
@@ -750,6 +905,7 @@ class PeopleView(QWidget):
             extra = f" · {self.plan.unknown_faces} faces seen only once" if self.plan.unknown_faces else ""
             self.summary.setText(f"{len(shown)} people in {len(photos):,} photos{extra}")
         self.export_btn.setEnabled(bool(shown))
+        self.together_btn.setEnabled(len(shown) >= 2)
 
 
 # =============================================================================
@@ -826,6 +982,19 @@ class Drawer(QFrame):
         fn.setObjectName("muted")
         fn.setWordWrap(True)
         lay.addWidget(fn)
+        self.split_people = QCheckBox("Split each person into Solo / Small Group / Group")
+        lay.addWidget(self.split_people)
+        grow = QHBoxLayout()
+        gl_ = QLabel("Big group starts at")
+        self.group_size = QSpinBox()
+        self.group_size.setRange(3, 30)
+        self.group_size.setSuffix(" people")
+        grow.addWidget(gl_)
+        grow.addWidget(self.group_size)
+        grow.addStretch()
+        lay.addLayout(grow)
+        self.group_folder = QCheckBox("Also make a “Group Photos” folder")
+        lay.addWidget(self.group_folder)
         self.forget_btn = QPushButton("Forget saved names…")
         self.forget_btn.setObjectName("danger")
         self.forget_btn.setToolTip("Clears the people ShadowSort remembers from earlier runs")
@@ -1017,8 +1186,9 @@ class MainWindow(QMainWindow):
         self.stage.cardClicked.connect(self._card_clicked)
         self.style_box.currentIndexChanged.connect(self._style_changed)
         self.details = DetailsView()
-        self.people = PeopleView(self._locate)
+        self.people = PeopleView(self._locate, group_size=lambda: self.drawer.group_size.value())
         self.people.exportRequested.connect(self.export_people)
+        self.people.togetherRequested.connect(self.together)
         self.people.openRequested.connect(
             lambda: self._open(os.path.join(self.drawer.out.text(), PEOPLE_FOLDER)))
         self.stack.addWidget(self.stage)
@@ -1068,6 +1238,7 @@ class MainWindow(QMainWindow):
         self.drawer = Drawer(root)
         self.drawer.empty_btn.clicked.connect(self.do_empty)
         self.drawer.copy_mode.toggled.connect(self._refresh)
+        self.drawer.group_size.valueChanged.connect(lambda _: self.people.rebuild() if self.people.plan else None)
 
         self.clock = QTimer(self)
         self.clock.timeout.connect(self._update_stats)
@@ -1122,6 +1293,9 @@ class MainWindow(QMainWindow):
         d.j_tiny.setChecked(s.value("j_tiny", False, type=bool))
         d.copy_mode.setChecked(s.value("copy", False, type=bool))
         d.faces.setChecked(s.value("faces", True, type=bool) and F.available())
+        d.split_people.setChecked(s.value("split_people", True, type=bool))
+        d.group_size.setValue(s.value("group_size", F.GROUP_SIZE, type=int))
+        d.group_folder.setChecked(s.value("group_folder", True, type=bool))
 
     def _save_settings(self):
         d = self.drawer
@@ -1129,7 +1303,9 @@ class MainWindow(QMainWindow):
                      "organize": d.organize.currentIndex(), "match": d.match.currentIndex(),
                      "ai": d.ai.isChecked(), "extra": d.extra.text(), "j_blur": d.j_blur.isChecked(),
                      "blur": d.blur.value(), "j_dark": d.j_dark.isChecked(), "j_tiny": d.j_tiny.isChecked(),
-                     "copy": d.copy_mode.isChecked(), "faces": d.faces.isChecked()}.items():
+                     "copy": d.copy_mode.isChecked(), "faces": d.faces.isChecked(),
+                     "split_people": d.split_people.isChecked(), "group_size": d.group_size.value(),
+                     "group_folder": d.group_folder.isChecked()}.items():
             self.settings.setValue(k, v)
 
     def closeEvent(self, e):
@@ -1145,7 +1321,8 @@ class MainWindow(QMainWindow):
             extra_categories=[x for x in d.extra.text().split(",") if x.strip()],
             junk_blurry=d.j_blur.isChecked(), junk_dark_blank=d.j_dark.isChecked(), junk_tiny=d.j_tiny.isChecked(),
             blur_threshold=float(d.blur.value()), copy_instead_of_move=d.copy_mode.isChecked(),
-            faces=d.faces.isChecked(),
+            faces=d.faces.isChecked(), split_people=d.split_people.isChecked(),
+            group_size=d.group_size.value(), group_folder=d.group_folder.isChecked(),
         )
 
     # ---------------------------------------------------------------- helpers
@@ -1348,36 +1525,84 @@ class MainWindow(QMainWindow):
             return None
         return src if os.path.exists(src) else None
 
-    def export_people(self):
-        if not self.plan or not self.plan.people:
-            return
-        if self._busy():
-            return
-        out = self.drawer.out.text()
-        default = out if out and os.path.isdir(out) else os.path.expanduser("~")
-        target = QFileDialog.getExistingDirectory(self, "Where should the ZIP files go?", default)
-        if not target:
-            return
-        people = list(self.plan.people)
+    def _current_locate(self):
         if self.state == "done":
             where = {a.src: a.dst for a in self.plan.actions if a.kind == "keep"}
-            locate = lambda s: where.get(s) if where.get(s) and os.path.exists(where[s]) else None  # noqa: E731
-        else:
-            locate = lambda s: s if os.path.exists(s) else None  # noqa: E731
+            return lambda s: where.get(s) if where.get(s) and os.path.exists(where[s]) else None  # noqa: E731
+        return lambda s: s if os.path.exists(s) else None  # noqa: E731
+
+    def _pick_target(self, title):
+        out = self.drawer.out.text()
+        default = out if out and os.path.isdir(out) else os.path.expanduser("~")
+        return QFileDialog.getExistingDirectory(self, title, default)
+
+    def export_people(self):
+        if not self.plan or not self.plan.people or self._busy():
+            return
+        people = [p for p in self.plan.people if not p.hidden]
+        dlg = ExportDialog(self, len(people))
+        if not dlg.exec():
+            return
+        kinds, split = dlg.kinds(), dlg.split.isChecked()
+        target = self._pick_target("Where should the ZIP files go?")
+        if not target:
+            return
+        locate, faces, gs = self._current_locate(), self.plan.faces, self.drawer.group_size.value()
 
         def job(w: Worker):
-            return F.export_zips(people, locate, target, progress=lambda d, t: w.progress.emit("Exporting", d, t))
+            return F.export_zips(people, locate, target, progress=lambda d, t: w.progress.emit("Exporting", d, t),
+                                 faces=faces, kinds=kinds, group_size=gs, split=split)
 
         def done(paths):
-            self.stage.set_status(f"exported {len(paths)} ZIP files · one per person", GREEN)
+            self.stage.set_status(f"exported {len(paths)} ZIP files · {', '.join(kinds).lower()}", GREEN)
             self._open(target)
 
         self._run(job, done)
+
+    def together(self):
+        if not self.plan or self._busy():
+            return
+        dlg = TogetherDialog(self, self.plan.people, self.state == "done")
+        if not dlg.exec() or not dlg.action:
+            return
+        chosen = dlg.chosen()
+        names = " & ".join(p.name for p in chosen)
+        if dlg.action == "zip":
+            target = self._pick_target("Where should the ZIP go?")
+            if not target:
+                return
+            locate = self._current_locate()
+
+            def job(w: Worker):
+                return F.export_together_zip(chosen, locate, target,
+                                             progress=lambda d, t: w.progress.emit("Exporting", d, t))
+
+            def done(path):
+                self.stage.set_status(f"exported {names}.zip", GREEN)
+                self._open(target)
+
+            self._run(job, done)
+            return
+        self.plan.together.append([p.name for p in chosen])
+        if self.state == "done":
+            from .engine import make_links, person_link_actions
+            acts = [a for a in person_link_actions(self.plan) if os.sep + "Together" + os.sep in a.dst
+                    and names.replace("/", "_") in a.dst]
+            n = make_links(self.plan, acts)
+            QMessageBox.information(self, __app_name__, f"Made By Person/Together/{names} with {n} photos.")
+            self._open(os.path.join(self.drawer.out.text(), PEOPLE_FOLDER, "Together"))
+        else:
+            QMessageBox.information(self, __app_name__, f"“{names}” will get its own folder in By Person/Together "
+                                    "when you press Organize now.")
 
     def apply(self):
         if not self.plan:
             return
         self.stage.finish_now()
+        d = self.drawer  # People settings can be changed after the scan
+        self.plan.options.split_people = d.split_people.isChecked()
+        self.plan.options.group_size = d.group_size.value()
+        self.plan.options.group_folder = d.group_folder.isChecked()
         st = self.plan.stats
         verb = "Copy" if self.plan.options.copy_instead_of_move else "Move"
         msg = (f"{verb} {st['keep']:,} photos into their folders and {st['duplicates'] + st['junk']:,} into "
