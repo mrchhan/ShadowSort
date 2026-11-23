@@ -73,3 +73,21 @@ def test_together_needs_everyone():
     c = F.Person(2, "C", "C", [], {"3.jpg"})
     assert F.together_photos([a, b]) == {"2.jpg", "3.jpg"}
     assert F.together_photos([a, b, c]) == {"3.jpg"}
+
+
+def test_scales_to_big_events():
+    """16,000-photo events produce tens of thousands of faces; grouping must stay fast and correct."""
+    import time
+    rng = np.random.default_rng(3)
+    centres = rng.normal(size=(1500, 128))
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    faces, truth = [], []
+    for p in range(6000):
+        for j, i in enumerate(rng.choice(1500, size=rng.integers(1, 5), replace=False)):
+            e = centres[i] + rng.normal(scale=0.75 / np.sqrt(128), size=128)
+            faces.append(F.Face(f"/p/{p}.jpg", (0.1 * j, 0.1, 0.1, 0.1), 0.95, 80.0, (e / np.linalg.norm(e)).astype(np.float32)))
+            truth.append(i)
+    t = time.time()
+    groups = F.cluster(faces)
+    assert time.time() - t < 30
+    assert all(len({truth[i] for i in g}) == 1 for g in groups)

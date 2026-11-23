@@ -361,7 +361,7 @@ def build_plan(opts: Options, progress: Optional[Progress] = None,
                 prog("Finding faces", 0, len(keepers))
                 plan.people, plan.faces, plan.unknown_faces = F.find_people(
                     [p.path for p in keepers], min_photos=opts.min_person_photos, workers=opts.workers,
-                    progress=lambda d, t: prog("Finding faces", d, t), cancelled=cancelled, log=log)
+                    progress=lambda d, t: prog("Finding faces", d, t), cancelled=cancelled, log=log, step=prog)
                 if cancelled():
                     raise Cancelled()
                 known = sum(p.known for p in plan.people)

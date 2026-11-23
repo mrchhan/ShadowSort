@@ -104,6 +104,7 @@ class Stage(QWidget):
     def LABEL_TIME(self):
         return getattr(self.style, "label_time", 1.8) if getattr(self, "style", None) else 1.8
     FILE_TIME = 3.2
+    MAX_FLYING = 2500
 
     def __init__(self, logo: Optional[QPixmap] = None, parent=None):
         super().__init__(parent)
@@ -231,6 +232,12 @@ class Stage(QWidget):
             t.v = 1 - rng.random() ** 1.4 * (0.25 + 0.7 * mound)
             t.delay = rng.random() * (self.FILE_TIME - 1.0)
             t.dur = 0.75 + rng.random() * 0.35
+        if len(self.tiles) > self.MAX_FLYING:
+            # thousands of photos: animate a sample, the rest are already in their folders
+            fly = set(rng.sample(range(len(self.tiles)), self.MAX_FLYING))
+            for k, t in enumerate(self.tiles):
+                if k not in fly:
+                    t.delay, t.dur = 0.0, 0.001
         self.total = len(self.tiles)
         idx = {t.path: i for i, t in enumerate(self.tiles)}
         self.dup_pairs = [(idx[g[0].path], idx[q.path]) for g in plan.groups for q in g[1:]

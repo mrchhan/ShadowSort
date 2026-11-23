@@ -459,6 +459,18 @@ class PhotosDialog(QDialog):
         self.accept()
 
 
+class LazyCombo(QComboBox):
+    def __init__(self, fill):
+        super().__init__()
+        self._fill, self._filled = fill, False
+
+    def showPopup(self):
+        if not self._filled:
+            self._filled = True
+            self._fill(self)
+        super().showPopup()
+
+
 class ExportDialog(QDialog):
     """Choose which photos go into each person's ZIP."""
 
@@ -629,14 +641,10 @@ class PersonCard(QFrame):
         self.hide_btn.setCheckable(True)
         self.hide_btn.setChecked(person.hidden)
         self.hide_btn.toggled.connect(self._hidden)
-        self.merge = QComboBox()
+        self.merge = LazyCombo(self._fill_merge)
         self.merge.setObjectName("mergeBox")
         self.merge.setIconSize(QSize(30, 30))
         self.merge.addItem("Same person as…", None)
-        for other in view.plan.people:
-            if other is not person:
-                icon = QIcon(crop_pixmap(other.crops[0], 30)) if other.crops else QIcon()
-                self.merge.addItem(icon, f"{other.name}  ·  {len(other.photos)} photos", other.pid)
         # the drop-down list is a separate window: style it explicitly so names are readable on Windows
         view_ = self.merge.view()
         view_.setStyleSheet("QListView{background:#0c1222;color:#e8eefc;border:1px solid #2d4f8f;outline:0;}"
@@ -672,6 +680,13 @@ class PersonCard(QFrame):
         else:
             self.setGraphicsEffect(None)
         self.view.refresh_summary()
+
+    def _fill_merge(self, combo):
+        """Filled only when opened: with 1,000+ people, building every list up front would freeze the app."""
+        for other in self.view.plan.people:
+            if other is not self.person and not other.hidden:
+                icon = QIcon(crop_pixmap(other.crops[0], 30)) if other.crops else QIcon()
+                combo.addItem(icon, f"{other.name}  ·  {len(other.photos)} photos", other.pid)
 
     def _merge(self, i):
         pid = self.merge.itemData(i)
@@ -752,6 +767,7 @@ class PeopleView(QWidget):
     openRequested = Signal()
 
     togetherRequested = Signal()
+    PAGE = 60   # cards built at a time; big events can have 1,000+ people
 
     def __init__(self, locate, group_size=lambda: F.GROUP_SIZE):
         super().__init__()
@@ -777,6 +793,11 @@ class PeopleView(QWidget):
         self.together_btn = QPushButton("Together…")
         self.together_btn.setToolTip("Photos that have two or more chosen people in them")
         self.together_btn.clicked.connect(self.togetherRequested.emit)
+        self.find = QLineEdit()
+        self.find.setPlaceholderText("Find a person…")
+        self.find.setFixedWidth(170)
+        self.find.textChanged.connect(lambda _: self.rebuild(keep_mains=True))
+        head.addWidget(self.find)
         head.addWidget(self.open_btn)
         head.addWidget(self.together_btn)
         head.addWidget(self.export_btn)
@@ -818,6 +839,11 @@ class PeopleView(QWidget):
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.scroll.setWidget(self.body)
         lay.addWidget(self.scroll, 1)
+        self.more_btn = QPushButton()
+        self.more_btn.clicked.connect(self._more)
+        self.more_btn.hide()
+        lay.addWidget(self.more_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.page = self.PAGE
         self.cards = []
         self.empty = QLabel("No people yet. Turn on “Recognise faces” in Settings and press Sort these.")
         self.empty.setObjectName("muted")
@@ -827,7 +853,12 @@ class PeopleView(QWidget):
 
     def set_plan(self, plan):
         self.plan = plan
+        self.page = self.PAGE
         self.rebuild()
+
+    def _more(self):
+        self.page += self.PAGE * 2
+        self.rebuild(keep_mains=True)
 
     def kinds_for(self, person):
         if not self.plan or not self.plan.faces:
@@ -836,19 +867,29 @@ class PeopleView(QWidget):
             self._mains = F.main_faces(self.plan.faces)
         return F.person_photo_kinds(person, self.plan.faces, self._mains, self.group_size())
 
-    def rebuild(self):
-        self._mains = None
+    def rebuild(self, keep_mains=False):
+        if not keep_mains:
+            self._mains = None
         for c in self.cards:
             c.setParent(None)
             c.deleteLater()
         self.cards = []
         people = self.plan.people if self.plan else []
+        q = self.find.text().strip().lower()
+        if q:
+            people = [p for p in people if q in p.name.lower()]
         self.empty.setVisible(not people)
-        for person in people:
+        self.setUpdatesEnabled(False)
+        for person in people[:self.page]:
             self.cards.append(PersonCard(self, person))
         self._place()
+        self.setUpdatesEnabled(True)
+        left = len(people) - len(self.cards)
+        self.more_btn.setVisible(left > 0)
+        self.more_btn.setText(f"Show more people ({left:,} left — people in fewer photos)")
         self.refresh_summary()
-        self.refresh_suggestions()
+        if not keep_mains:
+            self.refresh_suggestions()
 
     def refresh_suggestions(self):
         while self.suggest_row.count() > 1:
@@ -993,6 +1034,16 @@ class Drawer(QFrame):
         grow.addWidget(self.group_size)
         grow.addStretch()
         lay.addLayout(grow)
+        mrow = QHBoxLayout()
+        self.min_photos = QSpinBox()
+        self.min_photos.setRange(2, 50)
+        self.min_photos.setSuffix(" photos")
+        self.min_photos.setToolTip("Big events have hundreds of guests. Raise this to only list people who "
+                                   "appear in several photos.")
+        mrow.addWidget(QLabel("Only list people in at least"))
+        mrow.addWidget(self.min_photos)
+        mrow.addStretch()
+        lay.addLayout(mrow)
         self.group_folder = QCheckBox("Also make a “Group Photos” folder")
         lay.addWidget(self.group_folder)
         self.forget_btn = QPushButton("Forget saved names…")
@@ -1296,6 +1347,7 @@ class MainWindow(QMainWindow):
         d.split_people.setChecked(s.value("split_people", True, type=bool))
         d.group_size.setValue(s.value("group_size", F.GROUP_SIZE, type=int))
         d.group_folder.setChecked(s.value("group_folder", True, type=bool))
+        d.min_photos.setValue(s.value("min_photos", 2, type=int))
 
     def _save_settings(self):
         d = self.drawer
@@ -1305,7 +1357,7 @@ class MainWindow(QMainWindow):
                      "blur": d.blur.value(), "j_dark": d.j_dark.isChecked(), "j_tiny": d.j_tiny.isChecked(),
                      "copy": d.copy_mode.isChecked(), "faces": d.faces.isChecked(),
                      "split_people": d.split_people.isChecked(), "group_size": d.group_size.value(),
-                     "group_folder": d.group_folder.isChecked()}.items():
+                     "group_folder": d.group_folder.isChecked(), "min_photos": d.min_photos.value()}.items():
             self.settings.setValue(k, v)
 
     def closeEvent(self, e):
@@ -1323,6 +1375,7 @@ class MainWindow(QMainWindow):
             blur_threshold=float(d.blur.value()), copy_instead_of_move=d.copy_mode.isChecked(),
             faces=d.faces.isChecked(), split_people=d.split_people.isChecked(),
             group_size=d.group_size.value(), group_folder=d.group_folder.isChecked(),
+            min_person_photos=d.min_photos.value(),
         )
 
     # ---------------------------------------------------------------- helpers
@@ -1446,6 +1499,10 @@ class MainWindow(QMainWindow):
             self.stage.set_status(f"moving photos · {done:,} / {total:,}", ORANGE)
         elif stage == "Finding faces":
             self.stage.set_status(f"finding faces · {done:,} / {total:,}", ORANGE)
+        elif stage == "Grouping faces":
+            self.stage.set_status(f"grouping faces into people · {done:,} / {total:,}", ORANGE)
+        elif stage == "Preparing people":
+            self.stage.set_status(f"preparing people · {done:,} / {total:,}", ORANGE)
         elif stage == "Making people folders":
             self.stage.set_status(f"making people folders · {done:,} / {total:,}", ORANGE)
         elif stage == "Exporting":

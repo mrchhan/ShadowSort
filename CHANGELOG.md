@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.1
+- **Big events:** 16,000+ photos and thousands of people now work. Grouping faces is hundreds of times faster (one matrix product per face instead of comparing every group with every other).
+- People are shown 60 at a time with **Show more** and a **Find a person** box; the "Same person as…" list fills only when opened.
+- Face thumbnails are prepared in parallel with fast JPEG decoding.
+- New setting: only list people who appear in at least N photos (hides one-off guests).
+- New progress steps: *grouping faces* and *preparing people*.
+- The filing animation moves a sample of 2,500 photos, so it stays smooth with huge folders.
+
 ## 1.6.0
 - Each person's folder is split into **Solo / Small Group / Group**. Background faces don't count, and veiled, side-on or distant faces still count as "someone else is in the photo".
 - New **Group Photos** folder with every big group photo once.

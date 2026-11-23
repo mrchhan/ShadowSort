@@ -25,8 +25,8 @@
 
 | | |
 |---|---|
-| **Installer** | Download **`ShadowSort-Setup-1.6.0.exe`** from [Releases](https://github.com/mrchhan/shadowsort/releases) and run it. It adds a Start menu entry and a desktop shortcut. |
-| **Portable** | **`ShadowSort-Portable-1.6.0.zip`**: unzip anywhere and run `ShadowSort.exe`. No install needed. |
+| **Installer** | Download **`ShadowSort-Setup-1.6.1.exe`** from [Releases](https://github.com/mrchhan/shadowsort/releases) and run it. It adds a Start menu entry and a desktop shortcut. |
+| **Portable** | **`ShadowSort-Portable-1.6.1.zip`**: unzip anywhere and run `ShadowSort.exe`. No install needed. |
 
 > Windows may show *"Windows protected your PC"* because the installer isn't code-signed yet. Click **More info → Run anyway**.
 
@@ -136,7 +136,7 @@ build.bat ai     :: also bundles the content-recognition AI
 
 Then open `installer.iss` in [Inno Setup](https://jrsoftware.org/isinfo.php) and press **Compile**.
 
-**Automatic releases:** on GitHub, open **Actions → Release Windows app → Run workflow**, or push a tag such as `v1.6.0`. GitHub builds the installer and the portable zip on Windows and attaches them to a new Release.
+**Automatic releases:** on GitHub, open **Actions → Release Windows app → Run workflow**, or push a tag such as `v1.6.1`. GitHub builds the installer and the portable zip on Windows and attaches them to a new Release.
 
 ## How it works inside
 

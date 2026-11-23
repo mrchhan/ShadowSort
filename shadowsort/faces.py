@@ -220,33 +220,48 @@ def _norm(v):
     return v / (np.linalg.norm(v) + 1e-9)
 
 
-def cluster(faces: List[Face]) -> List[List[int]]:
+def cluster(faces: List[Face], progress: Optional[Callable[[int, int], None]] = None) -> List[List[int]]:
     """Greedy centroid clustering, best-quality faces first. Two faces in the same photo are
-    never the same person."""
-    order = sorted(range(len(faces)), key=lambda i: -faces[i].quality)
-    sums: List[np.ndarray] = []
+    never the same person. Fast for tens of thousands of faces (one matrix product per face)."""
+    n = len(faces)
+    if not n:
+        return []
+    order = sorted(range(n), key=lambda i: -faces[i].quality)
+    dim = faces[0].emb.shape[0]
+    cap = 1024
+    sums = np.zeros((cap, dim), np.float32)
+    cents = np.zeros((cap, dim), np.float32)
     members: List[List[int]] = []
     photos: List[Set[str]] = []
-    for i in order:
+    k = 0
+    for step, i in enumerate(order):
         f = faces[i]
         placed = False
-        if sums:
-            C = np.stack([_norm(s) for s in sums])
-            sims = C @ f.emb
-            for k in np.argsort(-sims):
-                if sims[k] < MATCH:
+        if k:
+            sims = cents[:k] @ f.emb
+            cand = np.flatnonzero(sims >= MATCH)
+            if cand.size:
+                for c in cand[np.argsort(-sims[cand])]:
+                    if f.path in photos[c]:
+                        continue
+                    sums[c] += f.emb
+                    cents[c] = sums[c] / (np.linalg.norm(sums[c]) + 1e-9)
+                    members[c].append(i)
+                    photos[c].add(f.path)
+                    placed = True
                     break
-                if f.path in photos[k]:
-                    continue
-                sums[k] = sums[k] + f.emb
-                members[k].append(i)
-                photos[k].add(f.path)
-                placed = True
-                break
         if not placed:
-            sums.append(f.emb.copy())
+            if k == cap:
+                cap *= 2
+                sums = np.resize(sums, (cap, dim))
+                cents = np.resize(cents, (cap, dim))
+            sums[k] = f.emb
+            cents[k] = f.emb
             members.append([i])
             photos.append({f.path})
+            k += 1
+        if progress and step % 500 == 0:
+            progress(step, n)
     return merge_split(faces, members)
 
 
@@ -269,62 +284,87 @@ def _same_enough(cs, ks):
     return cs >= MERGE or (ks >= MERGE_PAIRS and cs >= MERGE_FLOOR)
 
 
-def merge_split(faces: List[Face], members: List[List[int]]) -> List[List[int]]:
+def _centroids(faces, groups):
+    return np.stack([_norm(np.sum([faces[i].emb for i in g], axis=0)) for g in groups]).astype(np.float32)
+
+
+def _candidate_pairs(M: np.ndarray, floor: float, block: int = 2048):
+    """All (a, b, sim) with a < b and centroid similarity >= floor, computed in blocks to save memory."""
+    out = []
+    n = len(M)
+    for s0 in range(0, n, block):
+        S = M[s0:s0 + block] @ M.T
+        rows, cols = np.nonzero(S >= floor)
+        keep = cols > rows + s0
+        for r, c in zip(rows[keep], cols[keep]):
+            out.append((s0 + int(r), int(c), float(S[r, c])))
+    return out
+
+
+def merge_split(faces: List[Face], members: List[List[int]], max_rounds: int = 25) -> List[List[int]]:
     """Join groups that are really one person (makeup, lighting, glasses, age...).
-    Repeats until nothing more can be joined."""
+    Works in rounds; each round finds candidate pairs with one matrix product, so it scales
+    to thousands of groups."""
     members = [list(m) for m in members]
-    photos = [{faces[i].path for i in m} for m in members]
-    while len(members) > 1:
-        best, best_v = None, 0.0
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                shared = len(photos[a] & photos[b])
-                small = min(len(photos[a]), len(photos[b]))
-                if shared and (shared > max(1, 0.1 * small) or shared >= small):
-                    continue  # truly seen together in several photos -> two different people
-                cs, ks = link_scores(faces, members[a], members[b])
-                if _same_enough(cs, ks):
-                    v = cs + ks
-                    if v > best_v:
-                        best, best_v = (a, b), v
-        if not best:
+    for _ in range(max_rounds):
+        if len(members) < 2:
             break
-        a, b = best
-        members[a] += members[b]
-        del members[b], photos[b]
-        # one person can't be twice in the same photo: keep the closer face, set the other aside
-        c = _norm(np.sum([faces[i].emb for i in members[a]], axis=0))
-        by_photo: Dict[str, List[int]] = {}
-        for i in members[a]:
-            by_photo.setdefault(faces[i].path, []).append(i)
-        kept, aside = [], []
-        for idx in by_photo.values():
-            idx.sort(key=lambda i: -float(faces[i].emb @ c))
-            kept.append(idx[0])
-            aside += idx[1:]
-        members[a] = kept
-        photos[a] = {faces[i].path for i in kept}
-        for i in aside:
-            members.append([i])
-            photos.append({faces[i].path})
+        photos = [{faces[i].path for i in m} for m in members]
+        M = _centroids(faces, members)
+        scored = []
+        for a, b, cs in _candidate_pairs(M, MERGE_FLOOR):
+            shared = len(photos[a] & photos[b])
+            small = min(len(photos[a]), len(photos[b]))
+            if shared and (shared > max(1, 0.1 * small) or shared >= small):
+                continue  # truly seen together in several photos -> two different people
+            ks = cs if cs >= MERGE else link_scores(faces, members[a], members[b])[1]
+            if _same_enough(cs, ks):
+                scored.append((cs + ks, a, b))
+        if not scored:
+            break
+        scored.sort(key=lambda t: -t[0])
+        used, merged_into, gone = set(), [], set()
+        for _, a, b in scored:
+            if a in used or b in used:
+                continue
+            used.update((a, b))
+            members[a] += members[b]
+            gone.add(b)
+            merged_into.append(a)
+        extra = []
+        for a in merged_into:
+            # one person can't be twice in the same photo: keep the closer face, set the other aside
+            c = _norm(np.sum([faces[i].emb for i in members[a]], axis=0))
+            by_photo: Dict[str, List[int]] = {}
+            for i in members[a]:
+                by_photo.setdefault(faces[i].path, []).append(i)
+            kept = []
+            for idx in by_photo.values():
+                idx.sort(key=lambda i: -float(faces[i].emb @ c))
+                kept.append(idx[0])
+                extra += [[i] for i in idx[1:]]
+            members[a] = kept
+        members = [m for j, m in enumerate(members) if j not in gone] + extra
     return members
 
 
 def suggest_pairs(people: List["Person"], faces: List[Face], limit: int = 12, dismissed=()):
     """People that might be the same person - shown to the user to confirm with one click."""
+    if len(people) < 2:
+        return []
+    M = _centroids(faces, [p.faces for p in people])
     out = []
-    for i in range(len(people)):
-        for j in range(i + 1, len(people)):
-            a, b = people[i], people[j]
-            if (a.pid, b.pid) in dismissed or (b.pid, a.pid) in dismissed:
-                continue
-            if a.known and b.known and a.name != b.name:
-                continue
-            if len(a.photos & b.photos) > 1:
-                continue
-            cs, ks = link_scores(faces, a.faces, b.faces)
-            if cs >= SUGGEST or ks >= SUGGEST_PAIRS:
-                out.append((cs + ks, a, b))
+    for i, j, cs in _candidate_pairs(M, min(SUGGEST, 0.38)):
+        a, b = people[i], people[j]
+        if (a.pid, b.pid) in dismissed or (b.pid, a.pid) in dismissed:
+            continue
+        if a.known and b.known and a.name != b.name:
+            continue
+        if len(a.photos & b.photos) > 1:
+            continue
+        ks = link_scores(faces, a.faces, b.faces)[1]
+        if cs >= SUGGEST or ks >= SUGGEST_PAIRS:
+            out.append((cs + ks, a, b))
     out.sort(key=lambda t: -t[0])
     return [(a, b) for _, a, b in out[:limit]]
 
@@ -390,7 +430,8 @@ def forget_known(name: str) -> None:
 def find_people(paths: List[str], min_photos: int = 2, workers: int = 4,
                 progress: Optional[Callable[[int, int], None]] = None,
                 cancelled: Callable[[], bool] = lambda: False,
-                log: Callable[[str], None] = print):
+                log: Callable[[str], None] = print,
+                step: Optional[Callable[[str, int, int], None]] = None):
     engine = FaceEngine(log=log)
     faces: List[Face] = []
     total = len(paths)
@@ -404,7 +445,9 @@ def find_people(paths: List[str], min_photos: int = 2, workers: int = 4,
             if progress:
                 progress(i, total)
     faces.sort(key=lambda f: (f.path, f.box))
-    groups = cluster(faces)
+    log(f"Grouping {len(faces):,} faces…")
+    stage = (lambda name: (lambda d, t: step(name, d, t))) if step else (lambda name: None)
+    groups = cluster(faces, progress=stage("Grouping faces"))
 
     people: List[Person] = []
     unknown = 0
@@ -449,27 +492,47 @@ def find_people(paths: List[str], min_photos: int = 2, workers: int = 4,
             person.default_name = person.name
         for i in person.faces:
             faces[i].person = pid
-    for person in people:
-        make_crops(person, faces)
+    crop_all(people, faces, workers=workers, progress=stage("Preparing people"), cancelled=cancelled)
     return people, faces, unknown
+
+
+def crop_all(people: List[Person], faces: List[Face], workers: int = 4,
+             progress: Optional[Callable[[int, int], None]] = None,
+             cancelled: Callable[[], bool] = lambda: False) -> None:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(make_crops, p, faces) for p in people]
+        for i, _ in enumerate(as_completed(futs), 1):
+            if cancelled():
+                pool.shutdown(cancel_futures=True)
+                return
+            if progress and (i % 10 == 0 or i == len(futs)):
+                progress(i, len(futs))
 
 
 def make_crops(person: Person, faces: List[Face], count: int = 5) -> None:
     best = sorted(person.faces, key=lambda i: -faces[i].quality)[:count]
-    person.crops = []
+    crops = []
     for i in best:
         f = faces[i]
         try:
             with Image.open(f.path) as im:
+                x, y, w, h = f.box
+                W0, H0 = im.size
+                # decode JPEGs at reduced size: much faster with thousands of people
+                want = max(64, int(CROP / max(w, h, 1e-3) / 1.5))
+                try:
+                    im.draft("RGB", (want, want))
+                except Exception:
+                    pass
                 im = ImageOps.exif_transpose(im).convert("RGB")
                 W, H = im.size
-                x, y, w, h = f.box
-                cx, cy, s = (x + w / 2) * W, (y + h / 2) * H, max(w * W, h * H) * 1.5
-                box = (int(cx - s / 2), int(cy - s / 2), int(cx + s / 2), int(cy + s / 2))
+                cx, cy, s_ = (x + w / 2) * W, (y + h / 2) * H, max(w * W, h * H) * 1.5
+                box = (int(cx - s_ / 2), int(cy - s_ / 2), int(cx + s_ / 2), int(cy + s_ / 2))
                 crop = im.crop(box).resize((CROP, CROP), Image.Resampling.LANCZOS)
-                person.crops.append(crop.tobytes())
+                crops.append(crop.tobytes())
         except Exception:
             continue
+    person.crops = crops
 
 
 def merge_people(people: List[Person], faces: List[Face], src: Person, dst: Person) -> None:
